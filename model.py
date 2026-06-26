@@ -189,9 +189,6 @@ class STRIDE(nn.Module):
             raise ValueError("hidden_dim must be divisible by a positive num_heads")
         self.decode_steps = int(max(1, decode_steps))
         self.align_chunk_size = int(max(1, align_chunk_size))
-        self.use_mol = True
-        self.use_kg = True
-
         relation_to_family = relation_to_family.long()
         if relation_to_family.ndim != 1 or relation_to_family.numel() != self.num_relations:
             raise ValueError(
@@ -307,67 +304,46 @@ class STRIDE(nn.Module):
             nn.Dropout(dropout),
         )
 
-        if self.use_mol:
-            self.mol_expert = FactorizedRelationExpert(
-                input_dim=pair_dim,
-                hidden_dim=expert_hidden,
-                context_dim=expert_hidden,
-                num_relations=self.num_relations,
-                relation_to_family=self.relation_to_family,
-                num_families=num_families,
-                relation_embed_dim=hidden_dim,
-                dropout=dropout,
-            )
-        else:
-            self.mol_expert = None
+        self.mol_expert = FactorizedRelationExpert(
+            input_dim=pair_dim,
+            hidden_dim=expert_hidden,
+            context_dim=expert_hidden,
+            num_relations=self.num_relations,
+            relation_to_family=self.relation_to_family,
+            num_families=num_families,
+            relation_embed_dim=hidden_dim,
+            dropout=dropout,
+        )
+        self.kg_expert = FactorizedRelationExpert(
+            input_dim=pair_dim,
+            hidden_dim=expert_hidden,
+            context_dim=expert_hidden,
+            num_relations=self.num_relations,
+            relation_to_family=self.relation_to_family,
+            num_families=num_families,
+            relation_embed_dim=hidden_dim,
+            dropout=dropout,
+        )
+        self.cross_expert = FactorizedRelationExpert(
+            input_dim=pair_dim * 3,
+            hidden_dim=expert_hidden,
+            context_dim=expert_hidden,
+            num_relations=self.num_relations,
+            relation_to_family=self.relation_to_family,
+            num_families=num_families,
+            relation_embed_dim=hidden_dim,
+            dropout=dropout,
+        )
 
-        if self.use_kg:
-            self.kg_expert = FactorizedRelationExpert(
-                input_dim=pair_dim,
-                hidden_dim=expert_hidden,
-                context_dim=expert_hidden,
-                num_relations=self.num_relations,
-                relation_to_family=self.relation_to_family,
-                num_families=num_families,
-                relation_embed_dim=hidden_dim,
-                dropout=dropout,
-            )
-        else:
-            self.kg_expert = None
-
-        if self.use_mol and self.use_kg:
-            self.cross_expert = FactorizedRelationExpert(
-                input_dim=pair_dim * 3,
-                hidden_dim=expert_hidden,
-                context_dim=expert_hidden,
-                num_relations=self.num_relations,
-                relation_to_family=self.relation_to_family,
-                num_families=num_families,
-                relation_embed_dim=hidden_dim,
-                dropout=dropout,
-            )
-        else:
-            self.cross_expert = None
-
-        self.view_names = []
-        if self.use_mol:
-            self.view_names.append("mol")
-        if self.use_kg:
-            self.view_names.append("kg")
-        if self.cross_expert is not None:
-            self.view_names.append("cross")
+        self.view_names = ["mol", "kg", "cross"]
         self.num_views = len(self.view_names)
+        self.view_gate = nn.Sequential(
+            nn.Linear(expert_hidden + hidden_dim * 2, expert_hidden),
+            nn.ReLU(),
+            nn.Linear(expert_hidden, self.num_views),
+        )
 
-        if self.num_views > 1:
-            self.view_gate = nn.Sequential(
-                nn.Linear(expert_hidden + hidden_dim * 2, expert_hidden),
-                nn.ReLU(),
-                nn.Linear(expert_hidden, self.num_views),
-            )
-        else:
-            self.view_gate = None
-
-        align_input_dim = pair_dim * 2 if (self.use_mol and self.use_kg) else pair_dim
+        align_input_dim = pair_dim * 2
         self.align_fuse = nn.Sequential(
             nn.Linear(align_input_dim, align_hidden),
             nn.ReLU(),
@@ -589,74 +565,62 @@ class STRIDE(nn.Module):
             _pair_compose(drug1_embedding, drug2_embedding)
         )
 
-        view_scores = {}
-        mol_score = None
-        kg_score = None
-        cross_score = None
+        mol_pair = self._prepare_view_pair(
+            pair_base=_pair_compose(mol1_graph_embedding, mol2_graph_embedding),
+            relation_embed=relation_embed,
+            family_embed=family_embed,
+            rel_proj=self.mol_rel_pair_proj,
+            fam_proj=self.mol_fam_pair_proj,
+        )
+        mol_score, _ = self.mol_expert(
+            mol_pair,
+            pair_context,
+            relation_embed,
+            family_embed,
+        )
 
-        if self.use_mol:
-            mol_pair_base = _pair_compose(
-                mol1_graph_embedding,
-                mol2_graph_embedding,
-            )
-            mol_pair = self._prepare_view_pair(
-                pair_base=mol_pair_base,
-                relation_embed=relation_embed,
-                family_embed=family_embed,
-                rel_proj=self.mol_rel_pair_proj,
-                fam_proj=self.mol_fam_pair_proj,
-            )
-            mol_score, _ = self.mol_expert(mol_pair, pair_context, relation_embed, family_embed)
-            view_scores["mol"] = mol_score
-        else:
-            mol_pair = None
+        kg_pair = self._prepare_view_pair(
+            pair_base=_pair_compose(drug1_node_embedding, drug2_node_embedding),
+            relation_embed=relation_embed,
+            family_embed=family_embed,
+            rel_proj=self.kg_rel_pair_proj,
+            fam_proj=self.kg_fam_pair_proj,
+        )
+        kg_score, _ = self.kg_expert(
+            kg_pair,
+            pair_context,
+            relation_embed,
+            family_embed,
+        )
 
-        if self.use_kg:
-            kg_pair_base = _pair_compose(
-                drug1_node_embedding,
-                drug2_node_embedding,
-            )
-            kg_pair = self._prepare_view_pair(
-                pair_base=kg_pair_base,
-                relation_embed=relation_embed,
-                family_embed=family_embed,
-                rel_proj=self.kg_rel_pair_proj,
-                fam_proj=self.kg_fam_pair_proj,
-            )
-            kg_score, _ = self.kg_expert(kg_pair, pair_context, relation_embed, family_embed)
-            view_scores["kg"] = kg_score
-        else:
-            kg_pair = None
+        cross_pair = torch.cat([mol_pair, kg_pair, mol_pair * kg_pair], dim=-1)
+        cross_score, _ = self.cross_expert(
+            cross_pair,
+            pair_context,
+            relation_embed,
+            family_embed,
+        )
 
-        if self.cross_expert is not None:
-            cross_pair = torch.cat([mol_pair, kg_pair, mol_pair * kg_pair], dim=-1)
-            cross_score, _ = self.cross_expert(cross_pair, pair_context, relation_embed, family_embed)
-            view_scores["cross"] = cross_score
-
-        stacked_scores = torch.stack([view_scores[name] for name in self.view_names], dim=-1)
-        if self.num_views == 1:
-            unary_logits = stacked_scores.squeeze(-1)
-            view_gate = torch.ones_like(stacked_scores)
-        else:
-            bsz = stacked_scores.shape[0]
-            fam_idx = self.relation_to_family
-            ctx = pair_context.unsqueeze(1).expand(-1, self.num_relations, -1)
-            rel = relation_embed.unsqueeze(0).expand(bsz, -1, -1)
-            fam = family_embed[fam_idx].unsqueeze(0).expand(bsz, -1, -1)
-            gate_logits = self.view_gate(torch.cat([ctx, rel, fam], dim=-1))
-            view_gate = torch.softmax(gate_logits, dim=-1)
-            unary_logits = (stacked_scores * view_gate).sum(dim=-1)
+        stacked_scores = torch.stack([mol_score, kg_score, cross_score], dim=-1)
+        bsz = stacked_scores.shape[0]
+        fam_idx = self.relation_to_family
+        ctx = pair_context.unsqueeze(1).expand(-1, self.num_relations, -1)
+        rel = relation_embed.unsqueeze(0).expand(bsz, -1, -1)
+        fam = family_embed[fam_idx].unsqueeze(0).expand(bsz, -1, -1)
+        gate_logits = self.view_gate(torch.cat([ctx, rel, fam], dim=-1))
+        view_gate = torch.softmax(gate_logits, dim=-1)
+        unary_logits = (stacked_scores * view_gate).sum(dim=-1)
 
         if self.enable_alignment:
-            if self.use_mol and self.use_kg:
-                align_input = torch.cat([mol_pair, kg_pair], dim=-1)
-            elif self.use_mol:
-                align_input = mol_pair
-            else:
-                align_input = kg_pair
+            align_input = torch.cat([mol_pair, kg_pair], dim=-1)
             z = self.align_fuse(align_input)
-            aligned_z, align_loss = self._forward_alignment(z, isolate_backward=isolate_backward)
-            align_logits = (aligned_z * self.align_head_weight.unsqueeze(0)).sum(dim=-1) + self.align_head_bias.unsqueeze(0)
+            aligned_z, align_loss = self._forward_alignment(
+                z,
+                isolate_backward=isolate_backward,
+            )
+            align_logits = (
+                aligned_z * self.align_head_weight.unsqueeze(0)
+            ).sum(dim=-1) + self.align_head_bias.unsqueeze(0)
         else:
             align_loss = torch.tensor(0.0, device=unary_logits.device)
             align_logits = torch.zeros_like(unary_logits)
@@ -670,10 +634,7 @@ class STRIDE(nn.Module):
             decode_steps=decode_steps,
         )
 
-        if mol_score is not None and kg_score is not None:
-            consistency_loss = F.mse_loss(torch.sigmoid(mol_score), torch.sigmoid(kg_score))
-        else:
-            consistency_loss = torch.tensor(0.0, device=logits.device)
+        consistency_loss = F.mse_loss(torch.sigmoid(mol_score), torch.sigmoid(kg_score))
 
         return {
             "logits": logits,
@@ -684,9 +645,9 @@ class STRIDE(nn.Module):
             "consistency_loss": consistency_loss,
             "mi_mol_loss": mi_mol_loss,
             "mi_kg_loss": mi_kg_loss,
-            "mol_view_logits": mol_score if mol_score is not None else torch.zeros_like(logits),
-            "kg_view_logits": kg_score if kg_score is not None else torch.zeros_like(logits),
-            "cross_view_logits": cross_score if cross_score is not None else torch.zeros_like(logits),
+            "mol_view_logits": mol_score,
+            "kg_view_logits": kg_score,
+            "cross_view_logits": cross_score,
             "unary_logits": unary_logits,
             "align_logits": align_logits,
             "view_gate": view_gate,
