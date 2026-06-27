@@ -81,4 +81,4 @@ outputs/<protocol>/fold_<selection>/seed_<seed>/
 
 ## Notes
 
-Data and checkpoints at https://drive.google.com/drive/folders/1rPPjrL1otvnwCWtFz4yvHmnD1v7qv9_c?usp=sharing
+Datasets and model checkpoints are available at https://drive.google.com/drive/folders/1rPPjrL1otvnwCWtFz4yvHmnD1v7qv9_c?usp=sharing
