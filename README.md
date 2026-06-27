@@ -2,7 +2,7 @@
 
 This repository provides the code used for STRIDE, a structured relation-space inference framework for multi-view DDI event prediction.
 
-## Repository Contents
+## Contents
 
 - `train.py`: training and evaluation entry point.
 - `model.py`: STRIDE model, relation reasoning modules, and decoders.
